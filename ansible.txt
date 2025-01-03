@@ -1,0 +1,75 @@
+---
+- name: Transfer Oracle database objects
+  hosts: localhost
+  vars:
+    source_db_host: "source-db-host"
+    source_db_user: "source_user"
+    source_db_password: "source_password"
+    source_db_sid: "source_sid"
+    target_db_host: "target-db-host"
+    target_db_user: "target_user"
+    target_db_password: "target_password"
+    target_db_sid: "target_sid"
+    dump_file: "db_dump.dmp"
+    dump_log: "db_dump.log"
+    dump_dir: "/tmp"
+    dump_dir_name: "DUMP_DIR"
+
+  tasks:
+    - name: Create directory for dump on source
+      ansible.builtin.shell:
+        cmd: "mkdir -p {{ dump_dir }}"
+      become: true
+
+    - name: Create directory object in source database
+      ansible.builtin.shell: |
+        echo "
+        CREATE OR REPLACE DIRECTORY {{ dump_dir_name }} AS '{{ dump_dir }}';
+        " | sqlplus {{ source_db_user }}/{{ source_db_password }}@{{ source_db_host }}/{{ source_db_sid }}
+      register: source_dir_result
+
+    - name: Export database objects from source
+      ansible.builtin.shell: |
+        expdp {{ source_db_user }}/{{ source_db_password }}@{{ source_db_sid }}
+        DIRECTORY={{ dump_dir_name }}
+        DUMPFILE={{ dump_file }}
+        LOGFILE={{ dump_log }}
+      register: expdp_result
+
+    - name: Copy dump file to target host
+      ansible.builtin.fetch:
+        src: "{{ dump_dir }}/{{ dump_file }}"
+        dest: "{{ dump_dir }}"
+        flat: yes
+
+    - name: Transfer dump file to target database server
+      ansible.builtin.copy:
+        src: "{{ dump_dir }}/{{ dump_file }}"
+        dest: "{{ dump_dir }}"
+      delegate_to: "{{ target_db_host }}"
+
+    - name: Create directory object in target database
+      ansible.builtin.shell: |
+        echo "
+        CREATE OR REPLACE DIRECTORY {{ dump_dir_name }} AS '{{ dump_dir }}';
+        " | sqlplus {{ target_db_user }}/{{ target_db_password }}@{{ target_db_host }}/{{ target_db_sid }}
+      delegate_to: "{{ target_db_host }}"
+      register: target_dir_result
+
+    - name: Import database objects into target
+      ansible.builtin.shell: |
+        impdp {{ target_db_user }}/{{ target_db_password }}@{{ target_db_sid }}
+        DIRECTORY={{ dump_dir_name }}
+        DUMPFILE={{ dump_file }}
+        LOGFILE={{ dump_log }}
+      delegate_to: "{{ target_db_host }}"
+      register: impdp_result
+
+    - name: Cleanup dump files from both source and target
+      ansible.builtin.file:
+        path: "{{ dump_dir }}/{{ dump_file }}"
+        state: absent
+      delegate_to: "{{ item }}"
+      with_items:
+        - localhost
+        - "{{ target_db_host }}"
